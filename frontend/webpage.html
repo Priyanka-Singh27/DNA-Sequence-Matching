@@ -1916,7 +1916,7 @@ document.getElementById('gap-pen').addEventListener('input', function() {
 /* ============================================================
    NW ALIGNMENT (simplified simulation)
    ============================================================ */
-function nwAlign(a, b) {
+/*function nwAlign(a, b) {
   const m = a.length, n = b.length;
   const match = +document.getElementById('match-score').value || 2;
   const mismatch = -1, gap = +document.getElementById('gap-pen').value || -2;
@@ -1940,9 +1940,9 @@ function nwAlign(a, b) {
     else mismatches++;
   }
   return { alignA:ra, alignB:rb, score:dp[m][n], matches, mismatches, gaps, identity:((matches/ra.length)*100).toFixed(1) };
-}
+}*/
 
-function lcs(a,b) {
+/*function lcs(a,b) {
   let best=''; const n=a.length,m=b.length;
   const dp=Array.from({length:n+1},()=>new Array(m+1).fill(0));
   for (let i=1;i<=n;i++) for (let j=1;j<=m;j++) {
@@ -1950,7 +1950,7 @@ function lcs(a,b) {
     else dp[i][j]=0;
   }
   return best;
-}
+}*/
 
 function renderAlignment(container, alignA, alignB) {
   const baseColor = c => ({ A:'#00F5A0', T:'#00D1FF', G:'#BD00FF', C:'#FFB800', '-':'#4A5568' }[c]||'#E0E6ED');
@@ -2002,7 +2002,11 @@ document.getElementById('btn-compare').addEventListener('click', () => {
   let p=0; const pt = setInterval(()=>{ p=Math.min(100,p+4); prog.style.width=p+'%'; if(p>=100){clearInterval(pt);scan.classList.remove('active');} },40);
 
   setTimeout(()=>{
-    const r = nwAlign(a,b);
+    const r = fetch('http://localhost:5000/api/align', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ seq_a: a, seq_b: b, match, mismatch, gap })
+  }).then(res => res.json());
     animateScore(document.getElementById('stat-nw-score'), r.score);
     document.getElementById('stat-match').textContent     = r.matches;
     document.getElementById('stat-mismatch').textContent  = r.mismatches;
@@ -2300,7 +2304,11 @@ document.getElementById('btn-av-align').addEventListener('click', () => {
   const a = document.getElementById('av-seq-a').value.trim().toUpperCase().replace(/[^ATGC]/g,'');
   const b = document.getElementById('av-seq-b').value.trim().toUpperCase().replace(/[^ATGC]/g,'');
   if (!a || !b) return;
-  const r = nwAlign(a,b);
+  const r = fetch('http://localhost:5000/api/align', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ seq_a: a, seq_b: b, match, mismatch, gap })
+  }).then(res => res.json());
   document.getElementById('av-matches').textContent    = r.matches;
   document.getElementById('av-mismatches').textContent = r.mismatches;
   document.getElementById('av-gaps').textContent       = r.gaps;
