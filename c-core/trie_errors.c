@@ -802,7 +802,7 @@ static void test_load_from_file(void) {
     printf("\n[load from file]\n");
 
     /* Write a temp TSV file */
-    const char* tmpfile = "/tmp/test_snps.tsv";
+    const char* tmpfile = "test_snps.tsv";
     FILE* fp = fopen(tmpfile, "w");
     assert(fp != NULL);
     fprintf(fp, "rs334\tGTGCACCTGACTCCTGTG\tSickle Cell Anemia\t2\n");
