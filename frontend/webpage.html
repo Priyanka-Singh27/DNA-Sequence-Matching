@@ -1987,6 +1987,21 @@ function animateScore(el, target) {
   },30);
 }
 
+function lcs(X, Y) {
+    if (!X || !Y) return "";
+    let dp = Array.from({length: X.length + 1}, () => new Int32Array(Y.length + 1));
+    let len = 0, row = 0;
+    for (let i = 1; i <= X.length; i++) {
+        for (let j = 1; j <= Y.length; j++) {
+            if (X[i - 1] === Y[j - 1]) {
+                dp[i][j] = dp[i - 1][j - 1] + 1;
+                if (dp[i][j] > len) { len = dp[i][j]; row = i; }
+            }
+        }
+    }
+    return len > 0 ? X.substring(row - len, row) : "";
+}
+
 document.getElementById('btn-compare').addEventListener('click', () => {
   const a = document.getElementById('seq-a').value.trim().toUpperCase().replace(/[^ATGC]/g,'');
   const b = document.getElementById('seq-b').value.trim().toUpperCase().replace(/[^ATGC]/g,'');
@@ -2002,18 +2017,19 @@ document.getElementById('btn-compare').addEventListener('click', () => {
   let p=0; const pt = setInterval(()=>{ p=Math.min(100,p+4); prog.style.width=p+'%'; if(p>=100){clearInterval(pt);scan.classList.remove('active');} },40);
 
   setTimeout(()=>{
-    const r = fetch('http://localhost:5000/api/align', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ seq_a: a, seq_b: b, match, mismatch, gap })
-  }).then(res => res.json());
-    animateScore(document.getElementById('stat-nw-score'), r.score);
-    document.getElementById('stat-match').textContent     = r.matches;
-    document.getElementById('stat-mismatch').textContent  = r.mismatches;
-    document.getElementById('stat-gaps').textContent      = r.gaps;
-    document.getElementById('stat-identity').textContent  = r.identity + '%';
-    renderAlignment(document.getElementById('alignment-display'), r.alignA, r.alignB);
-    document.getElementById('lcs-display').textContent    = lcs(a,b) || '(no common substring found)';
+    fetch('http://localhost:5000/api/align', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ seq_a: a, seq_b: b, match: window.match||1, mismatch: window.mismatch||-1, gap: window.gap||-2 })
+    }).then(res => res.json()).then(r => {
+        animateScore(document.getElementById('stat-nw-score'), r.score);
+        document.getElementById('stat-match').textContent     = r.matches;
+        document.getElementById('stat-mismatch').textContent  = r.mismatches;
+        document.getElementById('stat-gaps').textContent      = r.gaps;
+        document.getElementById('stat-identity').textContent  = r.identity + '%';
+        renderAlignment(document.getElementById('alignment-display'), r.aligned_a, r.aligned_b);
+        document.getElementById('lcs-display').textContent    = lcs(a,b) || '(no common substring found)';
+    }).catch(e => console.error("API Backend disconnected: " + e));
   }, 700);
 });
 
@@ -2331,17 +2347,18 @@ document.getElementById('btn-av-align').addEventListener('click', () => {
   const a = document.getElementById('av-seq-a').value.trim().toUpperCase().replace(/[^ATGC]/g,'');
   const b = document.getElementById('av-seq-b').value.trim().toUpperCase().replace(/[^ATGC]/g,'');
   if (!a || !b) return;
-  const r = fetch('http://localhost:5000/api/align', {
+  fetch('http://localhost:5000/api/align', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ seq_a: a, seq_b: b, match, mismatch, gap })
-  }).then(res => res.json());
-  document.getElementById('av-matches').textContent    = r.matches;
-  document.getElementById('av-mismatches').textContent = r.mismatches;
-  document.getElementById('av-gaps').textContent       = r.gaps;
-  document.getElementById('av-identity').textContent   = r.identity + '%';
-  animateScore(document.getElementById('av-score'), r.score);
-  renderAlignment(document.getElementById('av-alignment-display'), r.alignA, r.alignB);
+    body: JSON.stringify({ seq_a: a, seq_b: b, match: 1, mismatch: -1, gap: -2 })
+  }).then(res => res.json()).then(r => {
+      document.getElementById('av-matches').textContent    = r.matches;
+      document.getElementById('av-mismatches').textContent = r.mismatches;
+      document.getElementById('av-gaps').textContent       = r.gaps;
+      document.getElementById('av-identity').textContent   = r.identity + '%';
+      animateScore(document.getElementById('av-score'), r.score);
+      renderAlignment(document.getElementById('av-alignment-display'), r.aligned_a, r.aligned_b);
+  }).catch(e => console.error("AV Alignment Error: " + e));
 });
 
 function pinAlignment() { alert('Alignment pinned! (In full implementation, this saves to comparison history.)'); }
