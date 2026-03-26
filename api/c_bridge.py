@@ -33,11 +33,8 @@ def _find_lib() -> Path:
 
     here = Path(__file__).parent
     candidates = [
-        here / "c-core" / "libdna.dll",   # Windows
-        here / "c-core" / "libdna.so",    # Linux/Mac
-        here / "../c-core" / "libdna.dll",
+        here / "c-core" / "libdna.so",
         here / "../c-core" / "libdna.so",
-        here / "libdna.dll",
         here / "libdna.so",
     ]
     for p in candidates:
@@ -297,6 +294,211 @@ def identity(seq_a: str, seq_b: str) -> float | None:
 
 
 # ============================================================
+# TRIE STRUCTS  (mirror trie_errors.h exactly)
+# ============================================================
+
+class TrieMatch(ctypes.Structure):
+    """Maps to TrieMatch in trie_errors.h"""
+    _fields_ = [
+        ("snp_id",         ctypes.c_char_p),
+        ("disease_label",  ctypes.c_char_p),
+        ("severity",       ctypes.c_int),
+        ("mismatches",     ctypes.c_int),
+        ("match_position", ctypes.c_int),
+    ]
+
+
+class TrieMatchList(ctypes.Structure):
+    """Maps to TrieMatchList in trie_errors.h"""
+    _fields_ = [
+        ("matches", ctypes.POINTER(TrieMatch)),
+        ("count",   ctypes.c_int),
+    ]
+
+
+# ============================================================
+# TRIE FUNCTION SIGNATURES
+# ============================================================
+
+_lib.trie_create.argtypes = []
+_lib.trie_create.restype  = ctypes.c_void_p
+
+_lib.trie_free.argtypes = [ctypes.c_void_p]
+_lib.trie_free.restype  = None
+
+_lib.trie_insert.argtypes = [
+    ctypes.c_void_p,   # Trie*
+    ctypes.c_char_p,   # snp_sequence
+    ctypes.c_char_p,   # disease
+    ctypes.c_char_p,   # snp_id
+    ctypes.c_int,      # severity
+]
+_lib.trie_insert.restype = None
+
+_lib.trie_search_exact.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+_lib.trie_search_exact.restype  = ctypes.c_int
+
+_lib.trie_search_fuzzy.argtypes = [
+    ctypes.c_void_p,   # Trie*
+    ctypes.c_char_p,   # query
+    ctypes.c_int,      # max_errors
+]
+_lib.trie_search_fuzzy.restype = ctypes.POINTER(TrieMatchList)
+
+_lib.trie_search_in_sequence.argtypes = [
+    ctypes.c_void_p,   # Trie*
+    ctypes.c_char_p,   # sequence
+    ctypes.c_int,      # max_errors
+]
+_lib.trie_search_in_sequence.restype = ctypes.POINTER(TrieMatchList)
+
+_lib.trie_load_from_file.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+_lib.trie_load_from_file.restype  = ctypes.c_int
+
+_lib.trie_match_list_free.argtypes = [ctypes.POINTER(TrieMatchList)]
+_lib.trie_match_list_free.restype  = None
+
+_lib.trie_match_list_to_json.argtypes = [ctypes.POINTER(TrieMatchList)]
+_lib.trie_match_list_to_json.restype  = ctypes.c_char_p
+
+
+# ============================================================
+# TRIE — module-level singleton
+# ============================================================
+# The trie is loaded ONCE at startup from clinvar_snps.tsv.
+# All route calls share this single in-memory trie.
+# Call trie_init() from app.py after Flask starts.
+
+_trie_handle = None   # raw C void* pointer
+
+
+def trie_init(tsv_filepath: str) -> int:
+    """
+    Load the SNP trie from a TSV file.
+    Call once at server startup.
+
+    Returns number of SNPs loaded, or -1 on failure.
+    """
+    global _trie_handle
+
+    # Free old trie if exists
+    if _trie_handle is not None:
+        _lib.trie_free(_trie_handle)
+
+    _trie_handle = _lib.trie_create()
+    if not _trie_handle:
+        return -1
+
+    count = _lib.trie_load_from_file(
+        _trie_handle,
+        tsv_filepath.encode("utf-8")
+    )
+    return count
+
+
+def trie_insert_snp(snp_sequence: str,
+                    disease: str,
+                    snp_id: str,
+                    severity: int) -> None:
+    """
+    Insert a single SNP into the loaded trie.
+    Requires trie_init() to have been called first.
+    """
+    if _trie_handle is None:
+        raise RuntimeError("Trie not initialised — call trie_init() first")
+    _lib.trie_insert(
+        _trie_handle,
+        _encode(snp_sequence),
+        disease.encode("utf-8"),
+        snp_id.encode("utf-8"),
+        ctypes.c_int(severity),
+    )
+
+
+def trie_exact(query: str) -> bool:
+    """
+    Exact SNP lookup.
+    Returns True if query exactly matches a stored SNP sequence.
+    """
+    if _trie_handle is None or not validate(query):
+        return False
+    return bool(_lib.trie_search_exact(_trie_handle, _encode(query)))
+
+
+def trie_fuzzy(query: str, max_errors: int = 1) -> list[dict]:
+    """
+    Fuzzy SNP search — finds all stored SNPs within max_errors mismatches.
+
+    Returns list of dicts:
+        [{ "snp_id": "rs334", "disease": "Sickle Cell Anemia",
+           "severity": 2, "mismatches": 0, "position": 0 }, ...]
+
+    Returns [] on no match or error.
+    """
+    if _trie_handle is None or not validate(query):
+        return []
+
+    ptr = _lib.trie_search_fuzzy(
+        _trie_handle,
+        _encode(query),
+        ctypes.c_int(max_errors)
+    )
+    if not ptr:
+        return []
+
+    result = _match_list_to_python(ptr)
+    _lib.trie_match_list_free(ptr)
+    return result
+
+
+def trie_scan_sequence(sequence: str, max_errors: int = 1) -> list[dict]:
+    """
+    Scan a full DNA sequence for any embedded SNP markers.
+    Slides a window across the sequence and checks each position.
+
+    Returns list of dicts (same format as trie_fuzzy).
+    """
+    if _trie_handle is None or not validate(sequence):
+        return []
+
+    ptr = _lib.trie_search_in_sequence(
+        _trie_handle,
+        _encode(sequence),
+        ctypes.c_int(max_errors)
+    )
+    if not ptr:
+        return []
+
+    result = _match_list_to_python(ptr)
+    _lib.trie_match_list_free(ptr)
+    return result
+
+
+def _match_list_to_python(ptr) -> list[dict]:
+    """
+    Convert a C TrieMatchList* into a Python list of dicts.
+    Internal helper — do not call directly.
+    """
+    if not ptr:
+        return []
+
+    ml = ptr.contents
+    results = []
+
+    for i in range(ml.count):
+        m = ml.matches[i]
+        results.append({
+            "snp_id":     m.snp_id.decode("utf-8")        if m.snp_id        else "",
+            "disease":    m.disease_label.decode("utf-8")  if m.disease_label else "",
+            "severity":   m.severity,
+            "mismatches": m.mismatches,
+            "position":   m.match_position,
+        })
+
+    return results
+
+
+# ============================================================
 # BRIDGE SELF-TEST
 # ============================================================
 
@@ -379,3 +581,221 @@ if __name__ == "__main__":
     print(f"\n{'=' * 55}")
     print(f"  Results: {_counts[1]} / {_counts[0]} tests passed")
     print(f"{'=' * 55}")
+
+# ============================================================
+# C-CORE: Suffix Tree
+# ============================================================
+
+_lib.suffix_tree_build.argtypes = [ctypes.c_char_p, ctypes.c_int]
+_lib.suffix_tree_build.restype = ctypes.c_void_p
+
+_lib.suffix_tree_search_to_json.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+_lib.suffix_tree_search_to_json.restype = ctypes.c_void_p
+
+_lib.suffix_tree_search.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+_lib.suffix_tree_search.restype = ctypes.c_void_p
+
+_lib.suffix_tree_free.argtypes = [ctypes.c_void_p]
+_lib.suffix_tree_free.restype = None
+
+_lib.suffix_tree_search_result_free.argtypes = [ctypes.c_void_p]
+_lib.suffix_tree_search_result_free.restype = None
+
+def suffix_tree_build(sequence: str):
+    b_seq = sequence.encode('utf-8')
+    return _lib.suffix_tree_build(b_seq, len(sequence))
+
+def suffix_tree_search(st_ptr, pattern: str):
+    b_pat = pattern.encode('utf-8')
+    res_ptr = _lib.suffix_tree_search(st_ptr, b_pat)
+    if not res_ptr: return None
+    
+    json_ptr = _lib.suffix_tree_search_to_json(res_ptr, b_pat)
+    if not json_ptr:
+        _lib.suffix_tree_search_result_free(res_ptr)
+        return None
+        
+    s = ctypes.cast(json_ptr, ctypes.c_char_p).value.decode('utf-8')
+    _libc.free(json_ptr)
+    _lib.suffix_tree_search_result_free(res_ptr)
+    
+    import json
+    try:
+        return json.loads(s)
+    except:
+        return s
+
+def suffix_tree_free(st_ptr):
+    if st_ptr:
+        _lib.suffix_tree_free(st_ptr)
+
+
+# ============================================================
+# C-CORE: Segment Tree
+# ============================================================
+# (Since the segment tree relies on clinvar loading)
+
+_lib.segment_tree_load_clinvar.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_char_p]
+_lib.segment_tree_load_clinvar.restype = ctypes.c_int
+
+_lib.segment_tree_query.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+_lib.segment_tree_query.restype = ctypes.c_void_p
+
+_lib.segment_tree_results_to_json.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_lib.segment_tree_results_to_json.restype = ctypes.c_void_p
+
+_lib.segment_tree_results_free.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_lib.segment_tree_results_free.restype = None
+
+_st_handle = None
+
+def segment_tree_init(filepath: str) -> int:
+    global _st_handle
+    if _st_handle:
+        _lib.segment_tree_free(_st_handle)
+        _st_handle = None
+    
+    ptr = ctypes.c_void_p()
+    b_path = filepath.encode('utf-8')
+    res = _lib.segment_tree_load_clinvar(ctypes.byref(ptr), b_path)
+    if res > 0:
+        _st_handle = ptr
+    return res
+
+def segment_tree_query(low: int, high: int):
+    if not _st_handle: return None
+    
+    count = ctypes.c_int(0)
+    res_ptr = _lib.segment_tree_query(_st_handle, low, high, ctypes.byref(count))
+    if not res_ptr: return []
+    
+    json_ptr = _lib.segment_tree_results_to_json(res_ptr, count.value)
+    if not json_ptr:
+        _lib.segment_tree_results_free(res_ptr, count.value)
+        return []
+        
+    s = ctypes.cast(json_ptr, ctypes.c_char_p).value.decode('utf-8')
+    _libc.free(json_ptr)
+    _lib.segment_tree_results_free(res_ptr, count.value)
+    
+    import json
+    try:
+        return json.loads(s)
+    except:
+        return s
+
+
+# ============================================================
+# C-CORE: Interval Tree
+# ============================================================
+
+_lib.interval_tree_create.argtypes = []
+_lib.interval_tree_create.restype = ctypes.c_void_p
+
+_lib.interval_tree_load_genes.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+_lib.interval_tree_load_genes.restype = ctypes.c_int
+
+_lib.interval_tree_query.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+_lib.interval_tree_query.restype = ctypes.c_void_p
+
+_lib.interval_tree_results_to_json.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_lib.interval_tree_results_to_json.restype = ctypes.c_void_p
+
+_lib.interval_tree_results_free.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_lib.interval_tree_results_free.restype = None
+
+_it_handle = None
+
+def interval_tree_init(filepath: str) -> int:
+    global _it_handle
+    if not _it_handle:
+        _it_handle = _lib.interval_tree_create()
+    
+    b_path = filepath.encode('utf-8')
+    return _lib.interval_tree_load_genes(_it_handle, b_path)
+
+def interval_tree_query(low: int, high: int):
+    if not _it_handle: return None
+    
+    count = ctypes.c_int(0)
+    res_ptr = _lib.interval_tree_query(_it_handle, low, high, ctypes.byref(count))
+    if not res_ptr: return []
+    
+    json_ptr = _lib.interval_tree_results_to_json(res_ptr, count.value)
+    if not json_ptr:
+        _lib.interval_tree_results_free(res_ptr, count.value)
+        return []
+        
+    s = ctypes.cast(json_ptr, ctypes.c_char_p).value.decode('utf-8')
+    _libc.free(json_ptr)
+    _lib.interval_tree_results_free(res_ptr, count.value)
+    
+    import json
+    try:
+        return json.loads(s)
+    except:
+        return s
+
+
+# ============================================================
+# C-CORE: Union Find
+# ============================================================
+
+_lib.union_find_create.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)]
+_lib.union_find_create.restype = ctypes.c_void_p
+
+_lib.union_find_cluster_species.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.POINTER(ctypes.c_double)), ctypes.c_double]
+_lib.union_find_cluster_species.restype = None
+
+_lib.union_find_clusters_to_json.argtypes = [ctypes.c_void_p]
+_lib.union_find_clusters_to_json.restype = ctypes.c_void_p
+
+_lib.union_find_merge_log_to_json.argtypes = [ctypes.c_void_p]
+_lib.union_find_merge_log_to_json.restype = ctypes.c_void_p
+
+_lib.union_find_free.argtypes = [ctypes.c_void_p]
+_lib.union_find_free.restype = None
+
+def union_find_process(species_list, similarity_matrix, threshold=95.0):
+    n = len(species_list)
+    
+    # Create array of char pointers for species
+    c_species = (ctypes.c_char_p * n)()
+    for i, s in enumerate(species_list):
+        c_species[i] = s.encode('utf-8')
+        
+    uf_ptr = _lib.union_find_create(n, c_species)
+    if not uf_ptr: return None
+    
+    # Create 2D array of doubles
+    # Python list of lists to C double**
+    c_matrix = (ctypes.POINTER(ctypes.c_double) * n)()
+    # Keep references to the rows to avoid garbage collection!!
+    rows = []
+    for i in range(n):
+        row = (ctypes.c_double * n)(*similarity_matrix[i])
+        c_matrix[i] = ctypes.cast(row, ctypes.POINTER(ctypes.c_double))
+        rows.append(row)
+        
+    _lib.union_find_cluster_species(uf_ptr, c_matrix, threshold)
+    
+    clusters_json_ptr = _lib.union_find_clusters_to_json(uf_ptr)
+    log_json_ptr = _lib.union_find_merge_log_to_json(uf_ptr)
+    
+    import json
+    out = {}
+    
+    if clusters_json_ptr:
+        cstr = ctypes.cast(clusters_json_ptr, ctypes.c_char_p).value.decode('utf-8')
+        _libc.free(clusters_json_ptr)
+        try: out["clusters"] = json.loads(cstr)
+        except: out["clusters"] = cstr
+        
+    if log_json_ptr:
+        lstr = ctypes.cast(log_json_ptr, ctypes.c_char_p).value.decode('utf-8')
+        _libc.free(log_json_ptr)
+        try: out["merge_log"] = json.loads(lstr)
+        except: out["merge_log"] = lstr
+        
+    _lib.union_find_free(uf_ptr)
+    return out

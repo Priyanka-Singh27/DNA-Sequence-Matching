@@ -15,15 +15,15 @@ Production:
 
 from flask import Flask, jsonify
 from flask_cors import CORS
+import os
 
 # ── blueprints ────────────────────────────────────────────
 from routes.alignment import alignment_bp
-# Future blueprints (uncomment as implemented):
-# from routes.suffix_tree  import suffix_tree_bp
-# from routes.trie         import trie_bp
-# from routes.segment_tree import segment_tree_bp
-# from routes.interval_tree import interval_tree_bp
-# from routes.union_find   import union_find_bp
+from routes.trie      import trie_bp, init_trie_from_file
+from routes.suffix_tree   import suffix_tree_bp, init_pathogens
+from routes.segment_tree  import segment_tree_bp, init_segment_tree
+from routes.interval_tree import interval_tree_bp, init_interval_tree
+from routes.union_find    import union_find_bp
 
 # ============================================================
 # APP FACTORY
@@ -42,11 +42,24 @@ def create_app() -> Flask:
 
     # ── register blueprints ──────────────────────────────
     app.register_blueprint(alignment_bp)
-    # app.register_blueprint(suffix_tree_bp)
-    # app.register_blueprint(trie_bp)
-    # app.register_blueprint(segment_tree_bp)
-    # app.register_blueprint(interval_tree_bp)
-    # app.register_blueprint(union_find_bp)
+    app.register_blueprint(trie_bp)
+    app.register_blueprint(suffix_tree_bp)
+    app.register_blueprint(segment_tree_bp)
+    app.register_blueprint(interval_tree_bp)
+    app.register_blueprint(union_find_bp)
+
+    # ── pre-load SNP trie at startup ─────────────────────
+    _snp_tsv = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "data", "clinvar_snps.tsv")
+    )
+    init_trie_from_file(_snp_tsv)
+    
+    _gene_tsv = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "data", "gene_regions.tsv")
+    )
+    init_segment_tree(_snp_tsv)
+    init_interval_tree(_gene_tsv)
+    init_pathogens()
 
     # ── health check ─────────────────────────────────────
     @app.route("/api/health", methods=["GET"])
@@ -54,7 +67,7 @@ def create_app() -> Flask:
         return jsonify({
             "status": "ok",
             "service": "GenomeX API",
-            "version": "0.1.0",
+            "version": "0.2.0",
             "endpoints_active": [
                 "POST /api/align",
                 "POST /api/score",
@@ -62,6 +75,11 @@ def create_app() -> Flask:
                 "POST /api/gc",
                 "POST /api/validate",
                 "POST /api/reverse_complement",
+                "POST /api/snp/fuzzy",
+                "POST /api/snp/exact",
+                "POST /api/snp/load",
+                "POST /api/mutations/scan",
+                "GET  /api/snp/stats",
             ]
         }), 200
 
